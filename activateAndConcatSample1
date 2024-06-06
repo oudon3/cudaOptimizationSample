@@ -1,0 +1,94 @@
+#include <cuda_runtime.h>
+#include <stdio.h>
+
+#define CHECK_CUDA_ERR(err) \
+    if (err != cudaSuccess) { \
+        printf("CUDA error: %s\n", cudaGetErrorString(err)); \
+        exit(err); \
+    }
+
+__global__ void m_SiLU_concat(
+    const half* __restrict__ input,
+    half cHalf,
+    const int address,
+    const int concatNum,
+    half* __restrict__ concatOutput,
+    const int channel,
+    const int dataSize)
+{
+    extern __shared__ half sharedMem[];
+
+    int tid = threadIdx.x;
+    int gid = threadIdx.x + blockIdx.x * blockDim.x;
+
+    if (gid >= dataSize) return;
+
+    const int pos_C = gid % channel;
+    const int pos_NHW = gid / channel;
+    const int pos_out = pos_C + (channel * concatNum * pos_NHW);
+
+    // Load input data to shared memory
+    sharedMem[tid] = input[gid];
+    __syncthreads();
+
+    // Perform SiLU computation using shared memory
+    const float inputf2 = __half2float(sharedMem[tid] * cHalf);
+    const float val = inputf2 * (tanhf(inputf2) + 1.0f);
+    sharedMem[tid] = __float2half(val);
+    __syncthreads();
+
+    // Write result to output
+    concatOutput[pos_out + channel * address] = sharedMem[tid];
+}
+
+void launch_m_SiLU_concat(
+    half* input,
+    half cHalf,
+    const int address,
+    const int concatNum,
+    half* concatOutput,
+    const int channel,
+    const int dataSize)
+{
+    const int threadsPerBlock = 256;
+    const int blocksPerGrid = (dataSize + threadsPerBlock - 1) / threadsPerBlock;
+    size_t sharedMemSize = threadsPerBlock * sizeof(half);
+
+    m_SiLU_concat<<<blocksPerGrid, threadsPerBlock, sharedMemSize>>>(
+        input, cHalf, address, concatNum, concatOutput, channel, dataSize);
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        printf("CUDA error: %s\n", cudaGetErrorString(err));
+    }
+}
+
+int main() {
+    int channel = 3;
+    int dataSize = 4 * 4 * 3; // Example data size
+    half input[dataSize];
+    half cHalf = __float2half(1.0f);
+    int address = 0;
+    int concatNum = 1;
+    half concatOutput[dataSize];
+
+    // Initialize input data (example)
+    for (int i = 0; i < dataSize; ++i) {
+        input[i] = __float2half(static_cast<float>(i));
+    }
+
+    // Launch kernel
+    launch_m_SiLU_concat(input, cHalf, address, concatNum, concatOutput, channel, dataSize);
+
+    // Copy results from device to host (example)
+    cudaDeviceSynchronize();
+
+    // Display results (example)
+    for (int i = 0; i < dataSize; ++i) {
+        float val = __half2float(concatOutput[i]);
+        printf("%f ", val);
+        if ((i + 1) % channel == 0) printf("\n");
+    }
+
+    return 0;
+}
