@@ -1,0 +1,120 @@
+#include <cuda_runtime.h>
+#include <stdio.h>
+
+// Define a macro for checking CUDA errors
+#define CHECK_CUDA_ERR(err) \
+    if (err != cudaSuccess) { \
+        printf("CUDA error: %s\n", cudaGetErrorString(err)); \
+        exit(err); \
+    }
+
+__global__ void m_SiLU_concat_shared(
+    const half* __restrict__ input,
+    const half cHalf,
+    const int address,
+    const int concatNum,
+    half* __restrict__ concatOutput,
+    const int channel,
+    const int height,
+    const int width)
+{
+    extern __shared__ half sharedMem[];
+
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    int c = blockIdx.z * blockDim.z + threadIdx.z;
+
+    if (x < width && y < height && c < channel) {
+        int index = ((blockIdx.z * blockDim.z + threadIdx.z) * height + y) * width + x;
+        int outIndex = (c + address * channel) + (y * width + x) * channel * concatNum;
+
+        // Load data to shared memory
+        sharedMem[threadIdx.z * blockDim.y * blockDim.x + threadIdx.y * blockDim.x + threadIdx.x] = input[index];
+        __syncthreads();
+
+        // Perform Swish (SiLU) operation
+        half val = sharedMem[threadIdx.z * blockDim.y * blockDim.x + threadIdx.y * blockDim.x + threadIdx.x];
+        float inputf2 = __half2float(val * cHalf);
+        float siLUVal = inputf2 * (tanhf(inputf2) + 1.0f);
+        sharedMem[threadIdx.z * blockDim.y * blockDim.x + threadIdx.y * blockDim.x + threadIdx.x] = __float2half(siLUVal);
+        __syncthreads();
+
+        // Write result to global memory
+        concatOutput[outIndex] = sharedMem[threadIdx.z * blockDim.y * blockDim.x + threadIdx.y * blockDim.x + threadIdx.x];
+    }
+}
+
+void launch_m_SiLU_concat(
+    half* input,
+    half cHalf,
+    const int address,
+    const int concatNum,
+    half* concatOutput,
+    const int channel,
+    const int height,
+    const int width)
+{
+    // Determine the appropriate block size based on shared memory limits
+    int block_size_x = 8;
+    int block_size_y = 8;
+    int block_size_z = min(16, 96 * 1024 / (block_size_x * block_size_y * sizeof(half))); // Adjust based on shared memory size
+
+    dim3 threadsPerBlock(block_size_x, block_size_y, block_size_z);
+    dim3 blocksPerGrid((width + threadsPerBlock.x - 1) / threadsPerBlock.x,
+                       (height + threadsPerBlock.y - 1) / threadsPerBlock.y,
+                       (channel + threadsPerBlock.z - 1) / threadsPerBlock.z);
+
+    size_t sharedMemSize = threadsPerBlock.x * threadsPerBlock.y * threadsPerBlock.z * sizeof(half);
+
+    m_SiLU_concat_shared<<<blocksPerGrid, threadsPerBlock, sharedMemSize>>>(
+        input, cHalf, address, concatNum, concatOutput, channel, height, width);
+
+    cudaError_t err = cudaGetLastError();
+    CHECK_CUDA_ERR(err);
+}
+
+void benchmark_m_SiLU_concat(int channel, int height, int width, int concatNum) {
+    size_t dataSize = channel * height * width * sizeof(half);
+    half* input;
+    half* concatOutput;
+    half cHalf = __float2half(1.0f);
+    int address = 0;
+
+    // Allocate memory
+    cudaMalloc(&input, dataSize);
+    cudaMalloc(&concatOutput, dataSize * concatNum);
+
+    // Initialize input data
+    half* h_input = (half*)malloc(dataSize);
+    for (int i = 0; i < channel * height * width; ++i) {
+        h_input[i] = __float2half(static_cast<float>(i));
+    }
+    cudaMemcpy(input, h_input, dataSize, cudaMemcpyHostToDevice);
+
+    // Warm up
+    launch_m_SiLU_concat(input, cHalf, address, concatNum, concatOutput, channel, height, width);
+    cudaDeviceSynchronize();
+
+    // Benchmark shared memory version
+    auto start = std::chrono::high_resolution_clock::now();
+    launch_m_SiLU_concat(input, cHalf, address, concatNum, concatOutput, channel, height, width);
+    cudaDeviceSynchronize();
+    auto end = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<float, std::milli> duration = end - start;
+    printf("m_SiLU_concat with shared memory took %f ms\n", duration.count());
+
+    // Clean up
+    cudaFree(input);
+    cudaFree(concatOutput);
+    free(h_input);
+}
+
+int main() {
+    int channel = 32;
+    int height = 272;
+    int width = 272;
+    int concatNum = 3;
+    benchmark_m_SiLU_concat(channel, height, width, concatNum);
+
+    return 0;
+}
