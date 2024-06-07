@@ -1,0 +1,38 @@
+__global__ void m_SiLU_concat(
+    half* input,
+    half* cHalf,
+    const int address,
+    const int concatNum,
+    half* concatOutput,
+    const int channel,
+    const int dataSize) {
+
+    extern __shared__ half sharedInput[];
+
+    int pos_in = threadIdx.x + blockIdx.x * blockDim.x;
+
+    if (pos_in >= dataSize) {
+        return;
+    }
+
+    // Load input data into shared memory
+    sharedInput[threadIdx.x] = input[pos_in];
+    __syncthreads();
+
+    // Calculate positions
+    int pos_C = pos_in % channel;
+    int pos_NHW = pos_in / channel;
+    int pos_out = pos_C + (channel * concatNum * pos_NHW);
+
+    // Perform Swish operation using shared memory
+    const float inputf2 = __half2float(sharedInput[threadIdx.x]);
+    const float float_val = inputf2 * (tanhf(inputf2) + 1.0f);
+    half result = __float2half(float_val);
+
+    // Write the result to the appropriate position in global memory
+    concatOutput[pos_out + channel * address] = result;
+}
+
+int threadsPerBlock = 256;
+int sharedMemorySize = threadsPerBlock * sizeof(half);
+m_SiLU_concat<<<numBlocks, threadsPerBlock, sharedMemorySize>>>(...);
