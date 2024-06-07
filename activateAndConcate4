@@ -103,9 +103,19 @@ void benchmark_m_SiLU_concat(int channel, int height, int width, int concatNum) 
     std::chrono::duration<float, std::milli> duration = end - start;
     printf("m_SiLU_concat with shared memory took %f ms\n", duration.count());
 
+    // Verify output
+    half* h_concatOutput = (half*)malloc(dataSize * concatNum);
+    cudaMemcpy(h_concatOutput, concatOutput, dataSize * concatNum, cudaMemcpyDeviceToHost);
+
+    // Print a small portion of the output for verification
+    for (int i = 0; i < min(10, channel * height * width * concatNum); ++i) {
+        printf("concatOutput[%d] = %f\n", i, __half2float(h_concatOutput[i]));
+    }
+
     // Clean up
     cudaFree(input);
     cudaFree(concatOutput);
+    free(h_concatOutput);
     free(h_input);
 }
 
