@@ -1,0 +1,46 @@
+__global__ void m_SiLU_concat(
+    half* input,
+    half cHalf,
+    const int address,
+    const int concatNum,
+    half* concatOutput,
+    const int channel,
+    const int hwSize,  // height * width を表す
+    const int dataSize) {
+
+    const int pos_in = threadIdx.x + blockIdx.x * blockDim.x;
+    if (pos_in >= dataSize) {
+        return;
+    }
+
+    // Calculate the position in the output tensor
+    const int pos_N = pos_in / (hwSize * channel);
+    const int pos_C = (pos_in % (hwSize * channel)) / hwSize;
+    const int pos_HW = pos_in % hwSize;
+    const int pos_out = pos_N * (hwSize * channel * concatNum) + pos_HW * (channel * concatNum) + pos_C + (channel * address);
+
+    // Perform Swish operation
+    const float inputf2 = __half2float(input[pos_in] + cHalf);
+    const float float_val = inputf2 * (tanhf(inputf2) + 1.0f);
+    const half result = __float2half(float_val);
+
+    // Write output to global memory
+    concatOutput[pos_out] = result;
+}
+
+void launch_m_SiLU_concat(
+    half* input,
+    half cHalf,
+    const int address,
+    const int concatNum,
+    half* concatOutput,
+    const int channel,
+    const int hwSize,  // height * width を表す
+    const int dataSize) {
+
+    const int threadsPerBlock = 256;  // Adjust based on your GPU's capabilities
+    const int blocksPerGrid = (dataSize + threadsPerBlock - 1) / threadsPerBlock;
+
+    m_SiLU_concat<<<blocksPerGrid, threadsPerBlock>>>(
+        input, cHalf, address, concatNum, concatOutput, channel, hwSize, dataSize);
+}
